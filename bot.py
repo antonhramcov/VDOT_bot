@@ -9,6 +9,8 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message
 
+from db import create_pool, init_db, save_latest_vdot
+
 
 DISTANCES_KM = {
     "полумарафон": 21.0975,
@@ -149,9 +151,11 @@ def format_duration(total_seconds: int) -> str:
 
 
 def pace_per_km(distance_km: float, total_seconds: int) -> str:
-    seconds_per_km = round(total_seconds / distance_km)
-    minutes, seconds = divmod(seconds_per_km, 60)
-    return f"{minutes}:{seconds:02d}/км"
+    return format_pace_seconds(pace_seconds_per_km(distance_km, total_seconds))
+
+
+def pace_seconds_per_km(distance_km: float, total_seconds: int) -> int:
+    return round(total_seconds / distance_km)
 
 
 HELP_TEXT = (
@@ -167,7 +171,7 @@ async def start(message: Message) -> None:
     await message.answer(HELP_TEXT)
 
 
-async def handle_result(message: Message) -> None:
+async def handle_result(message: Message, db_pool) -> None:
     try:
         result = parse_result(message.text or "")
         vdot = calculate_vdot(result.distance_km, result.total_seconds)
@@ -179,6 +183,20 @@ async def handle_result(message: Message) -> None:
             "Например: 5 км за 24:30"
         )
         return
+
+    if message.from_user:
+        await save_latest_vdot(
+            pool=db_pool,
+            user=message.from_user,
+            vdot=vdot,
+            distance_km=result.distance_km,
+            total_seconds=result.total_seconds,
+            race_pace_seconds=pace_seconds_per_km(
+                result.distance_km,
+                result.total_seconds,
+            ),
+            source_text=message.text or "",
+        )
 
     await message.answer(
         "VDOT: "
@@ -200,13 +218,23 @@ async def main() -> None:
     token = os.getenv("BOT_TOKEN")
     if not token:
         raise RuntimeError("Set BOT_TOKEN environment variable")
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("Set DATABASE_URL environment variable")
 
     bot = Bot(token=token)
+    db_pool = await create_pool(database_url)
+    await init_db(db_pool)
+
     dispatcher = Dispatcher()
+    dispatcher["db_pool"] = db_pool
     dispatcher.message.register(start, CommandStart())
     dispatcher.message.register(handle_result, F.text)
 
-    await dispatcher.start_polling(bot)
+    try:
+        await dispatcher.start_polling(bot)
+    finally:
+        await db_pool.close()
 
 
 if __name__ == "__main__":

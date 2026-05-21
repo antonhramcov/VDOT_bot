@@ -15,10 +15,11 @@ VDOT и показывает ориентировочные тренировоч
 
 ## Запуск
 
-Перед запуском добавьте токен в окружение:
+Перед запуском добавьте токен и строку подключения к PostgreSQL в окружение:
 
 ```bash
 export BOT_TOKEN=123456:telegram-token
+export DATABASE_URL=postgresql://gen_user:password@192.168.0.5:5432/default_db
 docker compose up --build
 ```
 
@@ -26,6 +27,7 @@ docker compose up --build
 
 ```env
 BOT_TOKEN=123456:telegram-token
+DATABASE_URL=postgresql://gen_user:password@192.168.0.5:5432/default_db
 ```
 
 Затем:
@@ -45,6 +47,14 @@ VDOT = VO2 / fraction
 ```
 
 где `v` — скорость в метрах в минуту, `t` — время в минутах.
+
+## База данных
+
+Бот подключается к PostgreSQL через переменную окружения `DATABASE_URL`.
+При старте он создает таблицу `user_vdots`, если ее еще нет. После каждого
+успешного расчета VDOT бот сохраняет последнюю запись пользователя по его
+Telegram ID. Локальный `.env` добавлен в `.gitignore`, поэтому реальные доступы
+к базе не попадут в репозиторий.
 
 ## Тренировочные темпы
 
