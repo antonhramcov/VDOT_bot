@@ -98,6 +98,48 @@ def calculate_vdot(distance_km: float, total_seconds: int) -> float:
     return vo2 / percent_vo2_max
 
 
+def velocity_for_vo2(vo2: float) -> float:
+    """Return meters per minute for the Daniels VO2 velocity equation."""
+    a = 0.000104
+    b = 0.182258
+    c = -4.60 - vo2
+    discriminant = b**2 - 4 * a * c
+    return (-b + math.sqrt(discriminant)) / (2 * a)
+
+
+def pace_for_vdot_fraction(vdot: float, fraction: float) -> int:
+    velocity_m_per_min = velocity_for_vo2(vdot * fraction)
+    seconds_per_km = round(60_000 / velocity_m_per_min)
+    return seconds_per_km
+
+
+def format_pace_seconds(seconds_per_km: int) -> str:
+    minutes, seconds = divmod(seconds_per_km, 60)
+    return f"{minutes}:{seconds:02d}/км"
+
+
+def format_pace_range(first_seconds: int, second_seconds: int) -> str:
+    faster, slower = sorted((first_seconds, second_seconds))
+    return (
+        f"{format_pace_seconds(faster).removesuffix('/км')}"
+        f"-{format_pace_seconds(slower)}"
+    )
+
+
+def training_paces(vdot: float) -> dict[str, str]:
+    """Approximate training paces derived from VDOT intensity fractions."""
+    return {
+        "Easy": format_pace_range(
+            pace_for_vdot_fraction(vdot, 0.65),
+            pace_for_vdot_fraction(vdot, 0.74),
+        ),
+        "Marathon": format_pace_seconds(pace_for_vdot_fraction(vdot, 0.84)),
+        "Threshold": format_pace_seconds(pace_for_vdot_fraction(vdot, 0.88)),
+        "Interval": format_pace_seconds(pace_for_vdot_fraction(vdot, 1.00)),
+        "Repetition": format_pace_seconds(pace_for_vdot_fraction(vdot, 1.08)),
+    }
+
+
 def format_duration(total_seconds: int) -> str:
     hours, remainder = divmod(total_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
@@ -129,6 +171,7 @@ async def handle_result(message: Message) -> None:
     try:
         result = parse_result(message.text or "")
         vdot = calculate_vdot(result.distance_km, result.total_seconds)
+        paces = training_paces(vdot)
     except ValueError:
         await message.answer(
             "Не смог разобрать результат.\n\n"
@@ -142,7 +185,13 @@ async def handle_result(message: Message) -> None:
         f"{vdot:.1f}\n"
         f"Дистанция: {result.distance_km:g} км\n"
         f"Время: {format_duration(result.total_seconds)}\n"
-        f"Темп: {pace_per_km(result.distance_km, result.total_seconds)}"
+        f"Темп: {pace_per_km(result.distance_km, result.total_seconds)}\n\n"
+        "Тренировочные темпы:\n"
+        f"Easy: {paces['Easy']}\n"
+        f"Marathon: {paces['Marathon']}\n"
+        f"Threshold: {paces['Threshold']}\n"
+        f"Interval: {paces['Interval']}\n"
+        f"Repetition: {paces['Repetition']}"
     )
 
 
