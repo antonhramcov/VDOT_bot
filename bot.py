@@ -9,13 +9,22 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from db import create_pool, get_latest_vdot, init_db, save_latest_vdot
+from db import (
+    create_pool,
+    ensure_user,
+    get_latest_vdot,
+    init_db,
+    save_latest_vdot,
+    set_user_language,
+)
+from texts import LANGUAGES, DEFAULT_LANGUAGE, supported_language_codes, text
 
 
 DISTANCES_KM = {
     "полумарафон": 21.0975,
     "полумарафонa": 21.0975,
     "half": 21.0975,
+    "half marathon": 21.0975,
     "halfmarathon": 21.0975,
     "hm": 21.0975,
     "марафон": 42.195,
@@ -126,30 +135,52 @@ def pace_for_vdot_fraction(vdot: float, fraction: float) -> int:
     return seconds_per_km
 
 
-def format_pace_seconds(seconds_per_km: int) -> str:
+def format_pace_seconds(
+    seconds_per_km: int,
+    language_code: str | None = None,
+) -> str:
     minutes, seconds = divmod(seconds_per_km, 60)
-    return f"{minutes}:{seconds:02d}/км"
+    pace_suffix = text(language_code, "pace_suffix")
+    return f"{minutes}:{seconds:02d}{pace_suffix}"
 
 
-def format_pace_range(first_seconds: int, second_seconds: int) -> str:
+def format_pace_range(
+    first_seconds: int,
+    second_seconds: int,
+    language_code: str | None = None,
+) -> str:
     faster, slower = sorted((first_seconds, second_seconds))
+    pace_suffix = text(language_code, "pace_suffix")
     return (
-        f"{format_pace_seconds(faster).removesuffix('/км')}"
-        f"-{format_pace_seconds(slower)}"
+        f"{format_pace_seconds(faster, language_code).removesuffix(pace_suffix)}"
+        f"-{format_pace_seconds(slower, language_code)}"
     )
 
 
-def training_paces(vdot: float) -> dict[str, str]:
+def training_paces(vdot: float, language_code: str | None = None) -> dict[str, str]:
     """Approximate training paces derived from VDOT intensity fractions."""
     return {
         "Easy": format_pace_range(
             pace_for_vdot_fraction(vdot, 0.65),
             pace_for_vdot_fraction(vdot, 0.74),
+            language_code,
         ),
-        "Marathon": format_pace_seconds(pace_for_vdot_fraction(vdot, 0.84)),
-        "Threshold": format_pace_seconds(pace_for_vdot_fraction(vdot, 0.88)),
-        "Interval": format_pace_seconds(pace_for_vdot_fraction(vdot, 1.00)),
-        "Repetition": format_pace_seconds(pace_for_vdot_fraction(vdot, 1.08)),
+        "Marathon": format_pace_seconds(
+            pace_for_vdot_fraction(vdot, 0.84),
+            language_code,
+        ),
+        "Threshold": format_pace_seconds(
+            pace_for_vdot_fraction(vdot, 0.88),
+            language_code,
+        ),
+        "Interval": format_pace_seconds(
+            pace_for_vdot_fraction(vdot, 1.00),
+            language_code,
+        ),
+        "Repetition": format_pace_seconds(
+            pace_for_vdot_fraction(vdot, 1.08),
+            language_code,
+        ),
     }
 
 
@@ -161,30 +192,55 @@ def format_duration(total_seconds: int) -> str:
     return f"{minutes}:{seconds:02d}"
 
 
-def pace_per_km(distance_km: float, total_seconds: int) -> str:
-    return format_pace_seconds(pace_seconds_per_km(distance_km, total_seconds))
+def pace_per_km(
+    distance_km: float,
+    total_seconds: int,
+    language_code: str | None = None,
+) -> str:
+    return format_pace_seconds(
+        pace_seconds_per_km(distance_km, total_seconds),
+        language_code,
+    )
 
 
 def pace_seconds_per_km(distance_km: float, total_seconds: int) -> int:
     return round(total_seconds / distance_km)
 
 
-HELP_TEXT = (
-    "Пришли результат забега, например:\n"
-    "5 км за 24:30\n"
-    "10 км за 52:10\n"
-    "полумарафон за 1:55:00\n\n"
-    "Я посчитаю VDOT по формуле Daniels.\n"
-    "Команда /my_vdot покажет твой сохраненный VDOT."
-)
-
-
-def training_keyboard() -> InlineKeyboardMarkup:
+def start_keyboard(language_code: str | None = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Рассчитать тренировку",
+                    text=text(language_code, "language_button"),
+                    callback_data="language:open",
+                )
+            ]
+        ]
+    )
+
+
+def language_keyboard() -> InlineKeyboardMarkup:
+    buttons = []
+    for language_code in supported_language_codes():
+        language = LANGUAGES[language_code]
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{language['flag']} {language['native_name']}",
+                    callback_data=f"language:set:{language_code}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def training_keyboard(language_code: str | None = None) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=text(language_code, "training_button"),
                     callback_data="training:calculate",
                 )
             ]
@@ -192,18 +248,18 @@ def training_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def save_decision_keyboard() -> InlineKeyboardMarkup:
+def save_decision_keyboard(language_code: str | None = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Да, изменить",
+                    text=text(language_code, "save_yes_button"),
                     callback_data="vdot_save:yes",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="Нет, оставить предыдущее",
+                    text=text(language_code, "save_no_button"),
                     callback_data="vdot_save:no",
                 )
             ],
@@ -211,10 +267,10 @@ def save_decision_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def format_training_paces(vdot: float) -> str:
-    paces = training_paces(vdot)
+def format_training_paces(vdot: float, language_code: str | None = None) -> str:
+    paces = training_paces(vdot, language_code)
     return (
-        "Тренировочные темпы:\n"
+        f"{text(language_code, 'training_paces')}\n"
         f"Easy: {paces['Easy']}\n"
         f"Marathon: {paces['Marathon']}\n"
         f"Threshold: {paces['Threshold']}\n"
@@ -223,55 +279,72 @@ def format_training_paces(vdot: float) -> str:
     )
 
 
-def format_result(result: RaceResult, vdot: float) -> str:
-    return (
-        "VDOT: "
-        f"{vdot:.1f}\n"
-        f"Дистанция: {result.distance_km:g} км\n"
-        f"Время: {format_duration(result.total_seconds)}\n"
-        f"Темп: {pace_per_km(result.distance_km, result.total_seconds)}"
+def format_result(
+    result: RaceResult,
+    vdot: float,
+    language_code: str | None = None,
+) -> str:
+    return text(
+        language_code,
+        "result",
+        vdot=vdot,
+        distance=result.distance_km,
+        duration=format_duration(result.total_seconds),
+        pace=pace_per_km(
+            result.distance_km,
+            result.total_seconds,
+            language_code,
+        ),
     )
 
 
-async def start(message: Message) -> None:
-    await message.answer(HELP_TEXT)
+async def resolve_language(db_pool, user) -> str:
+    if not user:
+        return DEFAULT_LANGUAGE
+    return await ensure_user(db_pool, user)
+
+
+async def start(message: Message, db_pool) -> None:
+    language_code = await resolve_language(db_pool, message.from_user)
+    await message.answer(
+        text(language_code, "start"),
+        reply_markup=start_keyboard(language_code),
+    )
 
 
 async def my_vdot(message: Message, db_pool) -> None:
     if not message.from_user:
         return
 
+    language_code = await resolve_language(db_pool, message.from_user)
     saved_vdot = await get_latest_vdot(db_pool, message.from_user.id)
     if not saved_vdot:
-        await message.answer(
-            "У тебя пока нет сохраненного VDOT.\n\n"
-            "Пришли результат забега, например: 5 км за 24:30"
-        )
+        await message.answer(text(language_code, "no_saved_vdot"))
         return
 
     await message.answer(
-        "Твой сохраненный VDOT: "
-        f"{saved_vdot['last_vdot']:.1f}\n"
-        f"Последний результат: {saved_vdot['distance_km']:g} км "
-        f"за {format_duration(saved_vdot['total_seconds'])}",
-        reply_markup=training_keyboard(),
+        text(language_code, "saved_vdot", vdot=saved_vdot["last_vdot"])
+        + text(
+            language_code,
+            "last_result",
+            distance=saved_vdot["distance_km"],
+            duration=format_duration(saved_vdot["total_seconds"]),
+        ),
+        reply_markup=training_keyboard(language_code),
     )
 
 
 async def handle_result(message: Message, db_pool) -> None:
+    language_code = await resolve_language(db_pool, message.from_user)
     try:
         result = parse_result(message.text or "")
         vdot = calculate_vdot(result.distance_km, result.total_seconds)
     except ValueError:
-        await message.answer(
-            "Не смог разобрать результат.\n\n"
-            "Формат: дистанция за время\n"
-            "Например: 5 км за 24:30"
-        )
+        await message.answer(text(language_code, "parse_error"))
         return
 
     if not message.from_user:
-        await message.answer(format_result(result, vdot))
+        await message.answer(format_result(result, vdot, language_code))
         return
 
     saved_vdot = await get_latest_vdot(db_pool, message.from_user.id)
@@ -289,20 +362,18 @@ async def handle_result(message: Message, db_pool) -> None:
             source_text=message.text or "",
         )
         await message.answer(
-            f"{format_result(result, vdot)}\n\n"
-            "Я запомнил твой текущий VDOT.\n"
-            "Могу сразу рассчитать тренировочные темпы.",
-            reply_markup=training_keyboard(),
+            f"{format_result(result, vdot, language_code)}\n\n"
+            f"{text(language_code, 'remembered_vdot')}",
+            reply_markup=training_keyboard(language_code),
         )
         return
 
     previous_vdot = float(saved_vdot["last_vdot"])
     if abs(vdot - previous_vdot) <= VDOT_EPSILON:
         await message.answer(
-            f"{format_result(result, vdot)}\n\n"
-            "VDOT совпадает с сохраненным значением. Можно сразу перейти "
-            "к тренировочным темпам.",
-            reply_markup=training_keyboard(),
+            f"{format_result(result, vdot, language_code)}\n\n"
+            f"{text(language_code, 'same_vdot')}",
+            reply_markup=training_keyboard(language_code),
         )
         return
 
@@ -312,22 +383,25 @@ async def handle_result(message: Message, db_pool) -> None:
         source_text=message.text or "",
     )
     if vdot > previous_vdot:
-        reaction = (
-            "Класс, VDOT вырос: "
-            f"{previous_vdot:.1f} -> {vdot:.1f}."
+        reaction = text(
+            language_code,
+            "vdot_improved",
+            previous=previous_vdot,
+            current=vdot,
         )
     else:
-        reaction = (
-            "VDOT стал ниже: "
-            f"{previous_vdot:.1f} -> {vdot:.1f}. Бывает, форма тоже ходит "
-            "волнами."
+        reaction = text(
+            language_code,
+            "vdot_declined",
+            previous=previous_vdot,
+            current=vdot,
         )
 
     await message.answer(
-        f"{format_result(result, vdot)}\n\n"
+        f"{format_result(result, vdot, language_code)}\n\n"
         f"{reaction}\n"
-        "Пересохранить VDOT для тебя?",
-        reply_markup=save_decision_keyboard(),
+        f"{text(language_code, 'ask_save_vdot')}",
+        reply_markup=save_decision_keyboard(language_code),
     )
 
 
@@ -336,10 +410,14 @@ async def handle_save_decision(callback: CallbackQuery, db_pool) -> None:
         await callback.answer()
         return
 
+    language_code = await resolve_language(db_pool, callback.from_user)
     decision = (callback.data or "").split(":", maxsplit=1)[-1]
     pending = PENDING_VDOTS.pop(callback.from_user.id, None)
     if not pending:
-        await callback.answer("Нет нового VDOT для сохранения.", show_alert=True)
+        await callback.answer(
+            text(language_code, "no_pending_vdot"),
+            show_alert=True,
+        )
         return
 
     if decision == "yes":
@@ -357,32 +435,69 @@ async def handle_save_decision(callback: CallbackQuery, db_pool) -> None:
         )
         if isinstance(callback.message, Message):
             await callback.message.answer(
-                f"Готово, я запомнил новый VDOT: {pending.vdot:.1f}.\n"
-                "Могу сразу рассчитать тренировочные темпы.",
-                reply_markup=training_keyboard(),
+                text(language_code, "saved_new_vdot", vdot=pending.vdot),
+                reply_markup=training_keyboard(language_code),
             )
-        await callback.answer("VDOT обновлен")
+        await callback.answer(text(language_code, "vdot_updated_alert"))
         return
 
     if isinstance(callback.message, Message):
         await callback.message.answer(
-            "Хорошо, оставляю предыдущее значение VDOT.",
-            reply_markup=training_keyboard(),
+            text(language_code, "kept_previous_vdot"),
+            reply_markup=training_keyboard(language_code),
         )
-    await callback.answer("Оставил прежний VDOT")
+    await callback.answer(text(language_code, "kept_previous_alert"))
 
 
 async def handle_training(callback: CallbackQuery, db_pool) -> None:
+    language_code = await resolve_language(db_pool, callback.from_user)
     saved_vdot = await get_latest_vdot(db_pool, callback.from_user.id)
     if not saved_vdot:
-        await callback.answer("Сначала пришли результат забега.", show_alert=True)
+        await callback.answer(
+            text(language_code, "send_result_first"),
+            show_alert=True,
+        )
         return
 
     vdot = float(saved_vdot["last_vdot"])
     if isinstance(callback.message, Message):
         await callback.message.answer(
-            f"Расчет по сохраненному VDOT {vdot:.1f}:\n\n"
-            f"{format_training_paces(vdot)}"
+            f"{text(language_code, 'training_by_vdot', vdot=vdot)}\n\n"
+            f"{format_training_paces(vdot, language_code)}"
+        )
+    await callback.answer()
+
+
+async def open_language_menu(callback: CallbackQuery, db_pool) -> None:
+    if callback.from_user:
+        await ensure_user(db_pool, callback.from_user)
+
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            text("en", "language_prompt"),
+            reply_markup=language_keyboard(),
+        )
+    await callback.answer()
+
+
+async def select_language(callback: CallbackQuery, db_pool) -> None:
+    if not callback.from_user:
+        await callback.answer()
+        return
+
+    language_code = (callback.data or "").split(":", maxsplit=2)[-1]
+    if language_code not in supported_language_codes():
+        language_code = DEFAULT_LANGUAGE
+    saved_language = await set_user_language(
+        db_pool,
+        callback.from_user,
+        language_code,
+    )
+
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            text(saved_language, "start"),
+            reply_markup=start_keyboard(saved_language),
         )
     await callback.answer()
 
@@ -404,6 +519,11 @@ async def main() -> None:
     dispatcher["db_pool"] = db_pool
     dispatcher.message.register(start, CommandStart())
     dispatcher.message.register(my_vdot, Command("my_vdot"))
+    dispatcher.callback_query.register(open_language_menu, F.data == "language:open")
+    dispatcher.callback_query.register(
+        select_language,
+        F.data.startswith("language:set:"),
+    )
     dispatcher.callback_query.register(
         handle_save_decision,
         F.data.startswith("vdot_save:"),

@@ -3,6 +3,21 @@ from __future__ import annotations
 import asyncpg
 from aiogram.types import User
 
+from texts import DEFAULT_LANGUAGE, normalize_language
+
+
+CREATE_BOT_USERS_TABLE = """
+CREATE TABLE IF NOT EXISTS bot_users (
+    telegram_user_id BIGINT PRIMARY KEY,
+    username TEXT,
+    first_name TEXT,
+    last_name TEXT,
+    language_code TEXT NOT NULL DEFAULT 'en',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
 
 CREATE_USER_VDOT_TABLE = """
 CREATE TABLE IF NOT EXISTS user_vdots (
@@ -17,6 +32,47 @@ CREATE TABLE IF NOT EXISTS user_vdots (
     source_text TEXT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+"""
+
+
+UPSERT_BOT_USER = """
+INSERT INTO bot_users (
+    telegram_user_id,
+    username,
+    first_name,
+    last_name,
+    language_code,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, $5, NOW())
+ON CONFLICT (telegram_user_id)
+DO UPDATE SET
+    username = EXCLUDED.username,
+    first_name = EXCLUDED.first_name,
+    last_name = EXCLUDED.last_name,
+    updated_at = NOW()
+RETURNING language_code;
+"""
+
+
+UPDATE_USER_LANGUAGE = """
+INSERT INTO bot_users (
+    telegram_user_id,
+    username,
+    first_name,
+    last_name,
+    language_code,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, $5, NOW())
+ON CONFLICT (telegram_user_id)
+DO UPDATE SET
+    username = EXCLUDED.username,
+    first_name = EXCLUDED.first_name,
+    last_name = EXCLUDED.last_name,
+    language_code = EXCLUDED.language_code,
+    updated_at = NOW()
+RETURNING language_code;
 """
 
 
@@ -71,7 +127,36 @@ async def create_pool(database_url: str) -> asyncpg.Pool:
 
 async def init_db(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as connection:
+        await connection.execute(CREATE_BOT_USERS_TABLE)
         await connection.execute(CREATE_USER_VDOT_TABLE)
+
+
+async def ensure_user(pool: asyncpg.Pool, user: User) -> str:
+    language_code = await pool.fetchval(
+        UPSERT_BOT_USER,
+        user.id,
+        user.username,
+        user.first_name,
+        user.last_name,
+        DEFAULT_LANGUAGE,
+    )
+    return normalize_language(language_code)
+
+
+async def set_user_language(
+    pool: asyncpg.Pool,
+    user: User,
+    language_code: str,
+) -> str:
+    saved_language = await pool.fetchval(
+        UPDATE_USER_LANGUAGE,
+        user.id,
+        user.username,
+        user.first_name,
+        user.last_name,
+        normalize_language(language_code),
+    )
+    return normalize_language(saved_language)
 
 
 async def get_latest_vdot(
