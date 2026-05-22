@@ -11,7 +11,9 @@ LANGUAGES = {
             "10 км за 52:10\n"
             "полумарафон за 1:55:00\n\n"
             "Я посчитаю VDOT по формуле Daniels.\n"
-            "Команда /my_vdot покажет твой сохраненный VDOT."
+            "/my_vdot покажет твой сохраненный VDOT.\n"
+            "/trains покажет текущие тренировки.\n"
+            "/language позволит сменить язык."
         ),
         "language_button": "Language",
         "language_prompt": "Choose your language:",
@@ -130,7 +132,9 @@ LANGUAGES = {
             "10 km in 52:10\n"
             "half marathon in 1:55:00\n\n"
             "I will calculate your VDOT with the Daniels formula.\n"
-            "Use /my_vdot to see your saved VDOT."
+            "/my_vdot shows your saved VDOT.\n"
+            "/trains shows your current training paces.\n"
+            "/language changes the language."
         ),
         "language_button": "Language",
         "language_prompt": "Choose your language:",

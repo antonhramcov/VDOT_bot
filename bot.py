@@ -7,7 +7,13 @@ from dataclasses import dataclass
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BotCommand,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from db import (
     create_pool,
@@ -371,6 +377,34 @@ async def my_vdot(message: Message, db_pool) -> None:
     )
 
 
+async def language_command(message: Message, db_pool) -> None:
+    if message.from_user:
+        await ensure_user(db_pool, message.from_user)
+
+    await message.answer(
+        text("en", "language_prompt"),
+        reply_markup=language_keyboard(),
+    )
+
+
+async def trains(message: Message, db_pool) -> None:
+    if not message.from_user:
+        return
+
+    language_code = await resolve_language(db_pool, message.from_user)
+    saved_vdot = await get_latest_vdot(db_pool, message.from_user.id)
+    if not saved_vdot:
+        await message.answer(text(language_code, "send_result_first"))
+        return
+
+    vdot = float(saved_vdot["last_vdot"])
+    await message.answer(
+        f"{text(language_code, 'training_by_vdot', vdot=vdot)}\n\n"
+        f"{format_training_paces(vdot, language_code)}",
+        reply_markup=training_details_keyboard(language_code),
+    )
+
+
 async def handle_result(message: Message, db_pool) -> None:
     language_code = await resolve_language(db_pool, message.from_user)
     try:
@@ -575,6 +609,14 @@ async def main() -> None:
         raise RuntimeError("Set DATABASE_URL environment variable")
 
     bot = Bot(token=token)
+    await bot.set_my_commands(
+        [
+            BotCommand(command="start", description="Start"),
+            BotCommand(command="my_vdot", description="Show saved VDOT"),
+            BotCommand(command="trains", description="Show training paces"),
+            BotCommand(command="language", description="Change language"),
+        ]
+    )
     db_pool = await create_pool(database_url)
     await init_db(db_pool)
 
@@ -582,6 +624,8 @@ async def main() -> None:
     dispatcher["db_pool"] = db_pool
     dispatcher.message.register(start, CommandStart())
     dispatcher.message.register(my_vdot, Command("my_vdot"))
+    dispatcher.message.register(trains, Command("trains"))
+    dispatcher.message.register(language_command, Command("language"))
     dispatcher.callback_query.register(open_language_menu, F.data == "language:open")
     dispatcher.callback_query.register(
         select_language,
