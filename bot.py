@@ -47,6 +47,13 @@ class PendingVdot:
 
 PENDING_VDOTS: dict[int, PendingVdot] = {}
 VDOT_EPSILON = 0.05
+TRAINING_ZONES = (
+    ("easy", 0.65, 0.74),
+    ("marathon", 0.84, None),
+    ("threshold", 0.88, None),
+    ("interval", 1.00, None),
+    ("repetition", 1.08, None),
+)
 
 
 def parse_time(value: str) -> int:
@@ -159,29 +166,20 @@ def format_pace_range(
 
 def training_paces(vdot: float, language_code: str | None = None) -> dict[str, str]:
     """Approximate training paces derived from VDOT intensity fractions."""
-    return {
-        "Easy": format_pace_range(
-            pace_for_vdot_fraction(vdot, 0.65),
-            pace_for_vdot_fraction(vdot, 0.74),
-            language_code,
-        ),
-        "Marathon": format_pace_seconds(
-            pace_for_vdot_fraction(vdot, 0.84),
-            language_code,
-        ),
-        "Threshold": format_pace_seconds(
-            pace_for_vdot_fraction(vdot, 0.88),
-            language_code,
-        ),
-        "Interval": format_pace_seconds(
-            pace_for_vdot_fraction(vdot, 1.00),
-            language_code,
-        ),
-        "Repetition": format_pace_seconds(
-            pace_for_vdot_fraction(vdot, 1.08),
-            language_code,
-        ),
-    }
+    paces = {}
+    for zone_id, first_fraction, second_fraction in TRAINING_ZONES:
+        if second_fraction is None:
+            paces[zone_id] = format_pace_seconds(
+                pace_for_vdot_fraction(vdot, first_fraction),
+                language_code,
+            )
+        else:
+            paces[zone_id] = format_pace_range(
+                pace_for_vdot_fraction(vdot, first_fraction),
+                pace_for_vdot_fraction(vdot, second_fraction),
+                language_code,
+            )
+    return paces
 
 
 def format_duration(total_seconds: int) -> str:
@@ -248,6 +246,34 @@ def training_keyboard(language_code: str | None = None) -> InlineKeyboardMarkup:
     )
 
 
+def training_details_keyboard(language_code: str | None = None) -> InlineKeyboardMarkup:
+    workout_names = text(language_code, "workout_names")
+    buttons = []
+    for zone_id, _, _ in TRAINING_ZONES:
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=workout_names[zone_id],
+                    callback_data=f"training:details:{zone_id}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def back_to_trainings_keyboard(language_code: str | None = None) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=text(language_code, "back_to_trainings_button"),
+                    callback_data="training:calculate",
+                )
+            ]
+        ]
+    )
+
+
 def save_decision_keyboard(language_code: str | None = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -269,13 +295,24 @@ def save_decision_keyboard(language_code: str | None = None) -> InlineKeyboardMa
 
 def format_training_paces(vdot: float, language_code: str | None = None) -> str:
     paces = training_paces(vdot, language_code)
-    return (
-        f"{text(language_code, 'training_paces')}\n"
-        f"Easy: {paces['Easy']}\n"
-        f"Marathon: {paces['Marathon']}\n"
-        f"Threshold: {paces['Threshold']}\n"
-        f"Interval: {paces['Interval']}\n"
-        f"Repetition: {paces['Repetition']}"
+    workout_names = text(language_code, "workout_names")
+    lines = [text(language_code, "training_paces")]
+    for zone_id, _, _ in TRAINING_ZONES:
+        lines.append(f"{workout_names[zone_id]}: {paces[zone_id]}")
+    return "\n".join(lines)
+
+
+def format_training_detail(
+    vdot: float,
+    zone_id: str,
+    language_code: str | None = None,
+) -> str:
+    paces = training_paces(vdot, language_code)
+    workout_names = text(language_code, "workout_names")
+    workout_descriptions = text(language_code, "workout_descriptions")
+    return workout_descriptions[zone_id].format(
+        name=workout_names[zone_id],
+        pace=paces[zone_id],
     )
 
 
@@ -461,9 +498,35 @@ async def handle_training(callback: CallbackQuery, db_pool) -> None:
 
     vdot = float(saved_vdot["last_vdot"])
     if isinstance(callback.message, Message):
-        await callback.message.answer(
+        await callback.message.edit_text(
             f"{text(language_code, 'training_by_vdot', vdot=vdot)}\n\n"
-            f"{format_training_paces(vdot, language_code)}"
+            f"{format_training_paces(vdot, language_code)}",
+            reply_markup=training_details_keyboard(language_code),
+        )
+    await callback.answer()
+
+
+async def handle_training_detail(callback: CallbackQuery, db_pool) -> None:
+    language_code = await resolve_language(db_pool, callback.from_user)
+    saved_vdot = await get_latest_vdot(db_pool, callback.from_user.id)
+    if not saved_vdot:
+        await callback.answer(
+            text(language_code, "send_result_first"),
+            show_alert=True,
+        )
+        return
+
+    zone_id = (callback.data or "").split(":", maxsplit=2)[-1]
+    valid_zone_ids = {item[0] for item in TRAINING_ZONES}
+    if zone_id not in valid_zone_ids:
+        await callback.answer()
+        return
+
+    vdot = float(saved_vdot["last_vdot"])
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            format_training_detail(vdot, zone_id, language_code),
+            reply_markup=back_to_trainings_keyboard(language_code),
         )
     await callback.answer()
 
@@ -527,6 +590,10 @@ async def main() -> None:
     dispatcher.callback_query.register(
         handle_save_decision,
         F.data.startswith("vdot_save:"),
+    )
+    dispatcher.callback_query.register(
+        handle_training_detail,
+        F.data.startswith("training:details:"),
     )
     dispatcher.callback_query.register(handle_training, F.data == "training:calculate")
     dispatcher.message.register(handle_result, F.text)
