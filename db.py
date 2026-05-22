@@ -20,6 +20,23 @@ CREATE TABLE IF NOT EXISTS user_vdots (
 """
 
 
+SELECT_USER_VDOT = """
+SELECT
+    telegram_user_id,
+    username,
+    first_name,
+    last_name,
+    last_vdot,
+    distance_km,
+    total_seconds,
+    race_pace_seconds,
+    source_text,
+    updated_at
+FROM user_vdots
+WHERE telegram_user_id = $1;
+"""
+
+
 UPSERT_USER_VDOT = """
 INSERT INTO user_vdots (
     telegram_user_id,
@@ -55,6 +72,13 @@ async def create_pool(database_url: str) -> asyncpg.Pool:
 async def init_db(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as connection:
         await connection.execute(CREATE_USER_VDOT_TABLE)
+
+
+async def get_latest_vdot(
+    pool: asyncpg.Pool,
+    telegram_user_id: int,
+) -> asyncpg.Record | None:
+    return await pool.fetchrow(SELECT_USER_VDOT, telegram_user_id)
 
 
 async def save_latest_vdot(

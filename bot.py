@@ -6,10 +6,10 @@ import re
 from dataclasses import dataclass
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart
-from aiogram.types import Message
+from aiogram.filters import Command, CommandStart
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from db import create_pool, init_db, save_latest_vdot
+from db import create_pool, get_latest_vdot, init_db, save_latest_vdot
 
 
 DISTANCES_KM = {
@@ -27,6 +27,17 @@ DISTANCES_KM = {
 class RaceResult:
     distance_km: float
     total_seconds: int
+
+
+@dataclass(frozen=True)
+class PendingVdot:
+    result: RaceResult
+    vdot: float
+    source_text: str
+
+
+PENDING_VDOTS: dict[int, PendingVdot] = {}
+VDOT_EPSILON = 0.05
 
 
 def parse_time(value: str) -> int:
@@ -163,19 +174,94 @@ HELP_TEXT = (
     "5 км за 24:30\n"
     "10 км за 52:10\n"
     "полумарафон за 1:55:00\n\n"
-    "Я посчитаю VDOT по формуле Daniels."
+    "Я посчитаю VDOT по формуле Daniels.\n"
+    "Команда /my_vdot покажет твой сохраненный VDOT."
 )
+
+
+def training_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Рассчитать тренировку",
+                    callback_data="training:calculate",
+                )
+            ]
+        ]
+    )
+
+
+def save_decision_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Да, изменить",
+                    callback_data="vdot_save:yes",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Нет, оставить предыдущее",
+                    callback_data="vdot_save:no",
+                )
+            ],
+        ]
+    )
+
+
+def format_training_paces(vdot: float) -> str:
+    paces = training_paces(vdot)
+    return (
+        "Тренировочные темпы:\n"
+        f"Easy: {paces['Easy']}\n"
+        f"Marathon: {paces['Marathon']}\n"
+        f"Threshold: {paces['Threshold']}\n"
+        f"Interval: {paces['Interval']}\n"
+        f"Repetition: {paces['Repetition']}"
+    )
+
+
+def format_result(result: RaceResult, vdot: float) -> str:
+    return (
+        "VDOT: "
+        f"{vdot:.1f}\n"
+        f"Дистанция: {result.distance_km:g} км\n"
+        f"Время: {format_duration(result.total_seconds)}\n"
+        f"Темп: {pace_per_km(result.distance_km, result.total_seconds)}"
+    )
 
 
 async def start(message: Message) -> None:
     await message.answer(HELP_TEXT)
 
 
+async def my_vdot(message: Message, db_pool) -> None:
+    if not message.from_user:
+        return
+
+    saved_vdot = await get_latest_vdot(db_pool, message.from_user.id)
+    if not saved_vdot:
+        await message.answer(
+            "У тебя пока нет сохраненного VDOT.\n\n"
+            "Пришли результат забега, например: 5 км за 24:30"
+        )
+        return
+
+    await message.answer(
+        "Твой сохраненный VDOT: "
+        f"{saved_vdot['last_vdot']:.1f}\n"
+        f"Последний результат: {saved_vdot['distance_km']:g} км "
+        f"за {format_duration(saved_vdot['total_seconds'])}",
+        reply_markup=training_keyboard(),
+    )
+
+
 async def handle_result(message: Message, db_pool) -> None:
     try:
         result = parse_result(message.text or "")
         vdot = calculate_vdot(result.distance_km, result.total_seconds)
-        paces = training_paces(vdot)
     except ValueError:
         await message.answer(
             "Не смог разобрать результат.\n\n"
@@ -184,7 +270,12 @@ async def handle_result(message: Message, db_pool) -> None:
         )
         return
 
-    if message.from_user:
+    if not message.from_user:
+        await message.answer(format_result(result, vdot))
+        return
+
+    saved_vdot = await get_latest_vdot(db_pool, message.from_user.id)
+    if not saved_vdot:
         await save_latest_vdot(
             pool=db_pool,
             user=message.from_user,
@@ -197,20 +288,103 @@ async def handle_result(message: Message, db_pool) -> None:
             ),
             source_text=message.text or "",
         )
+        await message.answer(
+            f"{format_result(result, vdot)}\n\n"
+            "Я запомнил твой текущий VDOT.\n"
+            "Могу сразу рассчитать тренировочные темпы.",
+            reply_markup=training_keyboard(),
+        )
+        return
+
+    previous_vdot = float(saved_vdot["last_vdot"])
+    if abs(vdot - previous_vdot) <= VDOT_EPSILON:
+        await message.answer(
+            f"{format_result(result, vdot)}\n\n"
+            "VDOT совпадает с сохраненным значением. Можно сразу перейти "
+            "к тренировочным темпам.",
+            reply_markup=training_keyboard(),
+        )
+        return
+
+    PENDING_VDOTS[message.from_user.id] = PendingVdot(
+        result=result,
+        vdot=vdot,
+        source_text=message.text or "",
+    )
+    if vdot > previous_vdot:
+        reaction = (
+            "Класс, VDOT вырос: "
+            f"{previous_vdot:.1f} -> {vdot:.1f}."
+        )
+    else:
+        reaction = (
+            "VDOT стал ниже: "
+            f"{previous_vdot:.1f} -> {vdot:.1f}. Бывает, форма тоже ходит "
+            "волнами."
+        )
 
     await message.answer(
-        "VDOT: "
-        f"{vdot:.1f}\n"
-        f"Дистанция: {result.distance_km:g} км\n"
-        f"Время: {format_duration(result.total_seconds)}\n"
-        f"Темп: {pace_per_km(result.distance_km, result.total_seconds)}\n\n"
-        "Тренировочные темпы:\n"
-        f"Easy: {paces['Easy']}\n"
-        f"Marathon: {paces['Marathon']}\n"
-        f"Threshold: {paces['Threshold']}\n"
-        f"Interval: {paces['Interval']}\n"
-        f"Repetition: {paces['Repetition']}"
+        f"{format_result(result, vdot)}\n\n"
+        f"{reaction}\n"
+        "Пересохранить VDOT для тебя?",
+        reply_markup=save_decision_keyboard(),
     )
+
+
+async def handle_save_decision(callback: CallbackQuery, db_pool) -> None:
+    if not callback.from_user:
+        await callback.answer()
+        return
+
+    decision = (callback.data or "").split(":", maxsplit=1)[-1]
+    pending = PENDING_VDOTS.pop(callback.from_user.id, None)
+    if not pending:
+        await callback.answer("Нет нового VDOT для сохранения.", show_alert=True)
+        return
+
+    if decision == "yes":
+        await save_latest_vdot(
+            pool=db_pool,
+            user=callback.from_user,
+            vdot=pending.vdot,
+            distance_km=pending.result.distance_km,
+            total_seconds=pending.result.total_seconds,
+            race_pace_seconds=pace_seconds_per_km(
+                pending.result.distance_km,
+                pending.result.total_seconds,
+            ),
+            source_text=pending.source_text,
+        )
+        if isinstance(callback.message, Message):
+            await callback.message.answer(
+                f"Готово, я запомнил новый VDOT: {pending.vdot:.1f}.\n"
+                "Могу сразу рассчитать тренировочные темпы.",
+                reply_markup=training_keyboard(),
+            )
+        await callback.answer("VDOT обновлен")
+        return
+
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            "Хорошо, оставляю предыдущее значение VDOT.",
+            reply_markup=training_keyboard(),
+        )
+    await callback.answer("Оставил прежний VDOT")
+
+
+async def handle_training(callback: CallbackQuery, db_pool) -> None:
+    saved_vdot = await get_latest_vdot(db_pool, callback.from_user.id)
+    if not saved_vdot:
+        await callback.answer("Сначала пришли результат забега.", show_alert=True)
+        return
+
+    vdot = float(saved_vdot["last_vdot"])
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            f"Расчет по сохраненному VDOT {vdot:.1f}:\n\n"
+            f"{format_training_paces(vdot)}"
+        )
+    await callback.answer()
 
 
 async def main() -> None:
@@ -229,6 +403,12 @@ async def main() -> None:
     dispatcher = Dispatcher()
     dispatcher["db_pool"] = db_pool
     dispatcher.message.register(start, CommandStart())
+    dispatcher.message.register(my_vdot, Command("my_vdot"))
+    dispatcher.callback_query.register(
+        handle_save_decision,
+        F.data.startswith("vdot_save:"),
+    )
+    dispatcher.callback_query.register(handle_training, F.data == "training:calculate")
     dispatcher.message.register(handle_result, F.text)
 
     try:
